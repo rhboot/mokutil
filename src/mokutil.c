@@ -2171,6 +2171,7 @@ main (int argc, char *argv[])
 	uint8_t verbosity = 0;
 	DBName db_name = MOK_LIST_RT;
 	int ret = -1;
+	int sb_check;
 
 	use_simple_hash = 0;
 
@@ -2425,7 +2426,9 @@ main (int argc, char *argv[])
 	if (hash_file && use_root_pw)
 		command |= HELP;
 
-	if (!(command & HELP)) {
+	sb_check = !(command & HELP || command & TEST_KEY ||
+		     command & VERBOSITY);
+	if (sb_check) {
 		/* Check whether the machine supports Secure Boot or not */
 		int rc;
 		uint8_t *data;
