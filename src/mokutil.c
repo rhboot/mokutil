@@ -84,6 +84,7 @@
 #define DELETE_HASH        (1 << 22)
 #define VERBOSITY          (1 << 23)
 #define TIMEOUT            (1 << 24)
+#define LIST_SBAT          (1 << 25)
 
 #define DEFAULT_CRYPT_METHOD SHA512_BASED
 #define DEFAULT_SALT_SIZE    SHA512_SALT_MAX
@@ -176,6 +177,7 @@ print_help ()
 	printf ("  --db\t\t\t\t\tList the keys in db\n");
 	printf ("  --dbx\t\t\t\t\tList the keys in dbx\n");
 	printf ("  --timeout <-1,0..0x7fff>\t\tSet the timeout for MOK prompt\n");
+	printf ("  --sbat\t\t\t\tList the entries in SBAT\n");
 	printf ("\n");
 	printf ("Supplimentary Options:\n");
 	printf ("  --hash-file <hash file>\t\tUse the specific password hash\n");
@@ -1599,6 +1601,31 @@ error:
 }
 
 static int
+print_var_content (const char *var_name, const efi_guid_t guid)
+{
+	uint8_t *data = NULL;
+	size_t data_size;
+	uint32_t attributes;
+	int ret;
+
+	ret = efi_get_variable (guid, var_name, &data, &data_size, &attributes);
+	if (ret < 0) {
+		if (errno == ENOENT) {
+			printf ("%s is empty\n", var_name);
+			return 0;
+		}
+
+		fprintf (stderr, "Failed to read %s: %m\n", var_name);
+		return -1;
+	}
+
+	printf ("%s", data);
+	free (data);
+
+	return ret;
+}
+
+static int
 revoke_request (MokRequest req)
 {
 	switch (req) {
@@ -2187,6 +2214,7 @@ main (int argc, char *argv[])
 			{"kek",                no_argument,       0, 0  },
 			{"db",                 no_argument,       0, 0  },
 			{"dbx",                no_argument,       0, 0  },
+			{"sbat",               no_argument,       0, 0  },
 			{"timeout",            required_argument, 0, 0  },
 			{0, 0, 0, 0}
 		};
@@ -2271,6 +2299,8 @@ main (int argc, char *argv[])
 				} else {
 					db_name = DBX;
 				}
+			}  else if (strcmp (option, "sbat") == 0) {
+				command |= LIST_SBAT;
 			} else if (strcmp (option, "timeout") == 0) {
 				command |= TIMEOUT;
 				timeout = strdup (optarg);
@@ -2542,6 +2572,9 @@ main (int argc, char *argv[])
 			break;
 		case TIMEOUT:
 			ret = set_timeout (timeout);
+			break;
+		case LIST_SBAT:
+			ret = print_var_content ("SBAT", efi_guid_shim);
 			break;
 		default:
 			print_help ();
