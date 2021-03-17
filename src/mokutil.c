@@ -251,6 +251,63 @@ signature_size (const efi_guid_t *hash_type)
 	return 0;
 }
 
+static int
+mok_get_variable(const char *name, uint8_t **datap, size_t *data_sizep)
+{
+	char filename[] = "/sys/firmware/efi/mok-variables/implausibly-long-mok-variable-name";
+	size_t filename_sz = sizeof(filename);
+	int fd, rc;
+	struct stat sb = { 0, };
+	uint8_t *buf;
+	size_t bufsz, pos = 0;
+	ssize_t ssz;
+
+	*datap = 0;
+	*data_sizep = 0;
+
+	snprintf(filename, filename_sz, "/sys/firmware/efi/mok-variables/%s", name);
+
+	fd = open(filename, O_RDONLY);
+	if (fd < 0)
+		return fd;
+
+	rc = fstat(fd, &sb);
+	if (rc < 0) {
+err_close:
+		close(fd);
+		return rc;
+	}
+
+	if (sb.st_size == 0) {
+		errno = ENOENT;
+		rc = -1;
+		goto err_close;
+	}
+
+	bufsz = sb.st_size;
+	buf = calloc(1, bufsz);
+	if (!buf)
+		goto err_close;
+
+	while (pos < bufsz) {
+		ssz = read(fd, &buf[pos], bufsz - pos);
+		if (ssz < 0) {
+			if (errno == EAGAIN ||
+			    errno == EWOULDBLOCK ||
+			    errno == EINTR)
+				continue;
+			free(buf);
+			goto err_close;
+		}
+
+		pos += ssz;
+	}
+	*datap = buf;
+	*data_sizep = pos;
+
+	return 0;
+}
+
 static MokListNode*
 build_mok_list (void *data, unsigned long data_size, uint32_t *mok_num)
 {
@@ -622,25 +679,44 @@ static int
 list_keys_in_var (const char *var_name, const efi_guid_t guid)
 {
 	uint8_t *data = NULL;
-	size_t data_size;
+	char varname[] = "implausibly-long-mok-variable-name";
+	size_t data_sz, i, varname_sz = sizeof(varname);
 	uint32_t attributes;
 	int ret;
 
-	ret = efi_get_variable (guid, var_name, &data, &data_size, &attributes);
-	if (ret < 0) {
-		if (errno == ENOENT) {
-			printf ("%s is empty\n", var_name);
-			return 0;
-		}
-
-		fprintf (stderr, "Failed to read %s: %m\n", var_name);
-		return -1;
+	ret = mok_get_variable(var_name, &data, &data_sz);
+	if (ret >= 0) {
+		ret = list_keys (data, data_sz);
+		free(data);
+		return ret;
 	}
 
-	ret = list_keys (data, data_size);
-	free (data);
+	for (i = 0; i < SIZE_MAX; i++) {
+		if (i == 0) {
+			snprintf(varname, varname_sz, "%s", var_name);
+		} else {
+			snprintf(varname, varname_sz, "%s%zu", var_name, i);
+		}
 
-	return ret;
+		ret = efi_get_variable (guid, varname, &data, &data_sz,
+					&attributes);
+		if (ret < 0)
+			return 0;
+
+		ret = list_keys (data, data_sz);
+		free(data);
+		/*
+		 * If ret is < 0, the next one will error as well.
+		 * If ret is 0, we need to test the next variable.
+		 * If it's 1, that's a real answer.
+		 */
+		if (ret < 0)
+			return 0;
+		if (ret > 0)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int
@@ -1039,22 +1115,15 @@ is_valid_cert (void *cert, uint32_t cert_size)
 }
 
 static int
-is_duplicate (const efi_guid_t *type, const void *data, const uint32_t data_size,
-	      const efi_guid_t *vendor, const char *db_name)
+is_one_duplicate (const efi_guid_t *type,
+		  const void *data, const uint32_t data_size,
+		  uint8_t *var_data, size_t var_data_size)
 {
-	uint8_t *var_data;
-	size_t var_data_size;
-	uint32_t attributes;
 	uint32_t node_num;
 	MokListNode *list;
 	int ret = 0;
 
-	if (!data || data_size == 0 || !db_name)
-		return 0;
-
-	ret = efi_get_variable (*vendor, db_name, &var_data, &var_data_size,
-				&attributes);
-	if (ret < 0)
+	if (!data || data_size == 0)
 		return 0;
 
 	list = build_mok_list (var_data, var_data_size, &node_num);
@@ -1087,9 +1156,67 @@ is_duplicate (const efi_guid_t *type, const void *data, const uint32_t data_size
 done:
 	if (list)
 		free (list);
-	free (var_data);
 
 	return ret;
+}
+
+static int
+is_duplicate (const efi_guid_t *type,
+	      const void *data, const uint32_t data_size,
+	      const efi_guid_t *vendor, const char *db_name)
+{
+	uint32_t attributes;
+	char varname[] = "implausibly-long-mok-variable-name";
+	size_t varname_sz = sizeof(varname);
+	int ret = 0;
+	size_t i;
+
+	if (!strncmp(db_name, "Mok", 3)) {
+		uint8_t *var_data = NULL;
+		size_t var_data_size = 0;
+		ret = mok_get_variable(db_name, &var_data, &var_data_size);
+		if (ret >= 0) {
+			ret = is_one_duplicate(type, data, data_size,
+					       var_data, var_data_size);
+			if (ret >= 0) {
+				free (var_data);
+				return ret;
+			}
+			var_data = NULL;
+			var_data_size = 0;
+		}
+	}
+
+	for (i = 0; i < SIZE_MAX; i++) {
+		uint8_t *var_data = NULL;
+		size_t var_data_size = 0;
+		if (i == 0) {
+			snprintf(varname, varname_sz, "%s", db_name);
+		} else {
+			snprintf(varname, varname_sz, "%s%zu", db_name, i);
+		}
+
+		ret = efi_get_variable (*vendor, varname,
+					&var_data, &var_data_size,
+					&attributes);
+		if (ret < 0)
+			return 0;
+
+		ret = is_one_duplicate(type, data, data_size,
+				       var_data, var_data_size);
+		free (var_data);
+		/*
+		 * If ret is < 0, the next one will error as well.
+		 * If ret is 0, we need to test the next variable.
+		 * If it's 1, that's a real answer.
+		 */
+		if (ret < 0)
+			return 0;
+		if (ret > 0)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int
