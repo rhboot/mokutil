@@ -83,6 +83,8 @@
 #define IMPORT_HASH        (1 << 21)
 #define DELETE_HASH        (1 << 22)
 #define VERBOSITY          (1 << 23)
+#define LIST_SBAT          (1 << 27)
+#define SET_SBAT           (1 << 28)
 
 #define DEFAULT_CRYPT_METHOD SHA512_BASED
 #define DEFAULT_SALT_SIZE    SHA512_SALT_MAX
@@ -152,10 +154,12 @@ print_help ()
 	printf ("  --import-hash <hash>\t\t\tImport a hash into MOK or MOKX\n");
 	printf ("  --delete-hash <hash>\t\t\tDelete a hash in MOK or MOKX\n");
 	printf ("  --set-verbosity <true/false>\t\tSet the verbosity bit for shim\n");
+	printf ("  --set-sbat-policy <latest/previous/delete>\t\tApply Latest, Previous, or Blank SBAT revocations\n");
 	printf ("  --pk\t\t\t\t\tList the keys in PK\n");
 	printf ("  --kek\t\t\t\t\tList the keys in KEK\n");
 	printf ("  --db\t\t\t\t\tList the keys in db\n");
 	printf ("  --dbx\t\t\t\t\tList the keys in dbx\n");
+	printf ("  --list-sbat-revocations\t\t\t\tList the entries in SBAT\n");
 	printf ("\n");
 	printf ("Supplimentary Options:\n");
 	printf ("  --hash-file <hash file>\t\tUse the specific password hash\n");
@@ -2116,6 +2120,31 @@ generate_pw_hash (const char *input_pw)
 }
 
 static int
+print_var_content (const char *var_name, const efi_guid_t guid)
+{
+	uint8_t *data = NULL;
+	size_t data_size;
+	uint32_t attributes;
+	int ret;
+
+	ret = efi_get_variable (guid, var_name, &data, &data_size, &attributes);
+	if (ret < 0) {
+		if (errno == ENOENT) {
+			printf ("%s is empty\n", var_name);
+			return 0;
+		}
+
+		fprintf (stderr, "Failed to read %s: %m\n", var_name);
+		return -1;
+	}
+
+	printf ("%s", data);
+	free (data);
+
+	return ret;
+}
+
+static int
 set_verbosity (uint8_t verbosity)
 {
 	if (verbosity) {
@@ -2156,6 +2185,26 @@ list_db (DBName db_name)
 	return -1;
 }
 
+static int
+manage_sbat (const uint8_t sbat_policy)
+{
+	if (sbat_policy) {
+		uint32_t attributes = EFI_VARIABLE_NON_VOLATILE
+				      | EFI_VARIABLE_BOOTSERVICE_ACCESS
+				      | EFI_VARIABLE_RUNTIME_ACCESS;
+		if (efi_set_variable (efi_guid_shim, "SbatPolicy",
+				      (uint8_t *)&sbat_policy,
+				      sizeof (sbat_policy),
+				      attributes, S_IRUSR | S_IWUSR) < 0) {
+			fprintf (stderr, "Failed to set SbatPolicy\n");
+			return -1;
+		}
+	} else {
+		return test_and_delete_var ("SbatPolicy");
+	}
+	return 0;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -2169,6 +2218,7 @@ main (int argc, char *argv[])
 	unsigned int command = 0;
 	int use_root_pw = 0;
 	uint8_t verbosity = 0;
+	uint8_t sbat_policy = 0;
 	DBName db_name = MOK_LIST_RT;
 	int ret = -1;
 
@@ -2207,10 +2257,12 @@ main (int argc, char *argv[])
 			{"import-hash",        required_argument, 0, 0  },
 			{"delete-hash",        required_argument, 0, 0  },
 			{"set-verbosity",      required_argument, 0, 0  },
+			{"set-sbat-policy",    required_argument, 0, 0  },
 			{"pk",                 no_argument,       0, 0  },
 			{"kek",                no_argument,       0, 0  },
 			{"db",                 no_argument,       0, 0  },
 			{"dbx",                no_argument,       0, 0  },
+			{"list-sbat-revocations", no_argument,       0, 0  },
 			{0, 0, 0, 0}
 		};
 
@@ -2270,6 +2322,16 @@ main (int argc, char *argv[])
 					verbosity = 0;
 				else
 					command |= HELP;
+			} else if (strcmp (option, "set-sbat-policy") == 0) {
+				command |= SET_SBAT;
+				if (strcmp (optarg, "latest") == 0)
+					sbat_policy = 1;
+				else if (strcmp (optarg, "previous") == 0)
+					sbat_policy = 2;
+				else if (strcmp (optarg, "delete") == 0)
+					sbat_policy = 3;
+				else
+					command |= HELP;
 			} else if (strcmp (option, "pk") == 0) {
 				if (db_name != MOK_LIST_RT) {
 					command |= HELP;
@@ -2298,6 +2360,10 @@ main (int argc, char *argv[])
 					command |= LIST_ENROLLED;
 					db_name = DBX;
 				}
+			}  else if (strcmp (option, "list-sbat-revocations") == 0) {
+				command |= LIST_SBAT;
+			}  else if (strcmp (option, "sbat") == 0) {
+				command |= LIST_SBAT;
 			}
 
 			break;
@@ -2556,6 +2622,12 @@ main (int argc, char *argv[])
 			break;
 		case VERBOSITY:
 			ret = set_verbosity (verbosity);
+			break;
+		case LIST_SBAT:
+			ret = print_var_content ("SbatLevelRT", efi_guid_shim);
+			break;
+		case SET_SBAT:
+			ret = manage_sbat(sbat_policy);
 			break;
 		default:
 			print_help ();
