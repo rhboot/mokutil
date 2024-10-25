@@ -2099,6 +2099,7 @@ main (int argc, char *argv[])
 		 requested */
 	if (!command || (command & HELP)) {
 		print_help ();
+		ret = 0;
 		goto out;
 	}
 
